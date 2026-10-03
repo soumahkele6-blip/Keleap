@@ -1,0 +1,131 @@
+name: Moteur APK Automatique
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        default: "MonApp"
+      package_id:
+        default: "com.monnom.app"
+      version_code:
+        default: "1"
+      version_name:
+        default: "1.0.0"
+      permissions:
+        default: "INTERNET"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Installer Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Construire le projet Android natif
+        run: |
+          mkdir -p android_app/app/src/main/assets
+          cp src/index.html android_app/app/src/main/assets/
+
+          # Construction dynamique des autorisations
+          XML_PERMS=""
+          IFS=',' read -ra ADDR <<< "${{ github.event.inputs.permissions }}"
+          for perm in "${ADDR[@]}"; do
+            XML_PERMS="$XML_PERMS\n    <uses-permission android:name=\"android.permission.$perm\" />"
+          done
+
+          cat <<EOF > android_app/app/src/main/AndroidManifest.xml
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              $XML_PERMS
+              <application
+                  android:label="${{ github.event.inputs.app_name }}"
+                  android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          PKG_PATH=$(echo "${{ github.event.inputs.package_id }}" | tr '.' '/')
+          mkdir -p "android_app/app/src/main/java/$PKG_PATH"
+          cat <<EOF > "android_app/app/src/main/java/$PKG_PATH/MainActivity.java"
+          package ${{ github.event.inputs.package_id }};
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+
+          public class MainActivity extends Activity {
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  WebView w = new WebView(this);
+                  WebSettings s = w.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setAllowFileAccess(true);
+                  w.setWebViewClient(new WebViewClient());
+                  w.loadUrl("file:///android_asset/index.html");
+                  setContentView(w);
+              }
+          }
+          EOF
+
+          cat <<EOF > android_app/settings.gradle
+          rootProject.name = 'App'
+          include ':app'
+          EOF
+
+          cat <<EOF > android_app/build.gradle
+          buildscript {
+              repositories { google(); mavenCentral() }
+              dependencies { classpath 'com.android.tools.build:gradle:8.2.2' }
+          }
+          allprojects {
+              repositories { google(); mavenCentral() }
+          }
+          EOF
+
+          cat <<EOF > android_app/app/build.gradle
+          plugins { id 'com.android.application' }
+          android {
+              namespace '${{ github.event.inputs.package_id }}'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "${{ github.event.inputs.package_id }}"
+                  minSdk 21
+                  targetSdk 34
+                  versionCode ${{ github.event.inputs.version_code }}
+                  versionName "${{ github.event.inputs.version_name }}"
+              }
+          }
+          EOF
+
+          cd android_app
+          gradle wrapper
+          ./gradlew assembleDebug
+
+      - name: Publier le lien de téléchargement direct
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create latest android_app/app/build/outputs/apk/debug/app-debug.apk \
+            --title "Dernière Compilation APK" \
+            --notes "Généré par Studio Mobile" \
+            --clobber
